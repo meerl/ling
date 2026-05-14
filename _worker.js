@@ -1,48 +1,60 @@
 import { connect } from 'cloudflare:sockets';
-const 转换密钥格式 = Array.from({ length: 256 }, (_, i) => (i + 256).toString(16).slice(1));
-let 哎呀呀这是我的VL密钥 = '25284107-7424-40a5-8396-cdd0623f4f05';
-let 反代IP = '';
+
 export default {
 	async fetch(访问请求) {
 		const 读取我的请求标头 = 访问请求.headers.get('Upgrade');
 		const url = new URL(访问请求.url);
 		if (读取我的请求标头 === 'websocket') {
-			if (url.searchParams.has('ip')) {
-				反代IP = url.searchParams.get('ip');
-			}
-			return await 升级WS请求();
+			const 反代IP = url.searchParams.get('ip') || '';
+			return await 升级WS请求(反代IP);
 		}
-		return new Response(null);
+		return new Response('Not found', { status: 404 });
 	},
 };
-async function 升级WS请求() {
-	const 创建WS接口 = new WebSocketPair();
-	const [客户端, WS接口] = Object.values(创建WS接口);
+
+async function 升级WS请求(反代IP) {
+	const [客户端, WS接口] = Object.values(new WebSocketPair());
 	WS接口.accept();
+	WS接口.binaryType = 'arraybuffer';
 	WS接口.send(new Uint8Array([0, 0]));
-	启动传输管道(WS接口);
+	启动传输管道(WS接口, 反代IP);
 	return new Response(null, { status: 101, webSocket: 客户端 });
 }
-async function 启动传输管道(WS接口) {
+
+async function 启动传输管道(WS接口, 反代IP) {
 	let TCP接口;
-	let 首包数据 = true;
-	let 首包处理 = Promise.resolve();
 	let 传输数据;
-	WS接口.addEventListener('message', async (event) => {
-		if (首包数据) {
-			首包数据 = false;
-			首包处理 = 首包处理.then(async () => {
-				await 解析VL标头(event.data);
+
+	const stream = new ReadableStream({
+		start(controller) {
+			WS接口.addEventListener('message', (event) => {
+				const message = event.data;
+				controller.enqueue(message);
 			});
-		} else {
-			await 首包处理;
-			await 传输数据.write(event.data);
-		}
+
+			WS接口.addEventListener('close', () => {
+				controller.close();
+			});
+
+			WS接口.addEventListener('error', (error) => {
+				controller.error(error);
+			});
+		},
 	});
+
+	stream.pipeTo(
+		new WritableStream({
+			async write(chunk) {
+				if (传输数据) {
+					await 传输数据.write(chunk);
+				} else {
+					await 解析VL标头(chunk);
+				}
+			},
+		}),
+	);
+
 	async function 解析VL标头(VL数据) {
-		if (验证VL的密钥(new Uint8Array(VL数据.slice(1, 17))) !== 哎呀呀这是我的VL密钥) {
-			return;
-		}
 		const 获取数据定位 = new Uint8Array(VL数据)[17];
 		const 提取端口索引 = 18 + 获取数据定位 + 1;
 		const 建立端口缓存 = VL数据.slice(提取端口索引, 提取端口索引 + 2);
@@ -82,20 +94,22 @@ async function 启动传输管道(WS接口) {
 		} catch {
 			const [反代IP地址, 反代IP端口 = 访问端口] = 反代IP.split(':');
 			TCP接口 = connect({ hostname: 反代IP地址, port: 反代IP端口 });
+			await TCP接口.opened;
 		}
 		建立传输管道(写入初始数据);
 	}
 
-	function 验证VL的密钥(arr, offset = 0) {
-		const uuid = (转换密钥格式[arr[offset + 0]] + 转换密钥格式[arr[offset + 1]] + 转换密钥格式[arr[offset + 2]] + 转换密钥格式[arr[offset + 3]] + '-' + 转换密钥格式[arr[offset + 4]] + 转换密钥格式[arr[offset + 5]] + '-' + 转换密钥格式[arr[offset + 6]] + 转换密钥格式[arr[offset + 7]] + '-' + 转换密钥格式[arr[offset + 8]] + 转换密钥格式[arr[offset + 9]] + '-' + 转换密钥格式[arr[offset + 10]] + 转换密钥格式[arr[offset + 11]] + 转换密钥格式[arr[offset + 12]] + 转换密钥格式[arr[offset + 13]] + 转换密钥格式[arr[offset + 14]] + 转换密钥格式[arr[offset + 15]]).toLowerCase();
-		return uuid;
-	}
 	async function 建立传输管道(写入初始数据) {
 		传输数据 = TCP接口.writable.getWriter();
-		if (写入初始数据) await 传输数据.write(写入初始数据);
-		await TCP接口.readable.pipeTo(
+
+		if (写入初始数据?.byteLength > 0) {
+			await 传输数据.write(写入初始数据);
+			写入初始数据 = null;
+		}
+
+		TCP接口.readable.pipeTo(
 			new WritableStream({
-				async write(chunk) {
+				write(chunk) {
 					WS接口.send(chunk);
 				},
 			}),
